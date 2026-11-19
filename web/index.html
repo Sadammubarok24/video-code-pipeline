@@ -5,10 +5,17 @@
 <style>
   html, body { margin: 0; background: #000; overflow: hidden; }
   #c { display: block; width: 100vw; height: 100vh; }
-  #fade { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; }
-  #title { position: fixed; left: 6%; right: 6%; top: 9%; text-align: center; color: #fff;
-           font: 800 5.2vw/1.15 system-ui, "Segoe UI", Roboto, "DejaVu Sans", sans-serif;
-           text-shadow: 0 0.4vw 1.2vw rgba(0,0,0,.55); }
+  .ov { position: fixed; pointer-events: none; }
+  #flash { inset: 0; background: #fff; opacity: 0; }
+  #bar { left: 0; top: 0; height: 0.7vh; width: 0; background: #ffd23f; }
+  #title { left: 5%; right: 5%; top: 7%; text-align: center; color: #fff; text-transform: uppercase; letter-spacing: .02em;
+           font: 900 6.6vw/1.1 system-ui, "Segoe UI", Roboto, "DejaVu Sans", sans-serif;
+           text-shadow: 0 .5vw 0 rgba(0,0,0,.55), 0 0 2vw rgba(0,0,0,.6); }
+  #cap { left: 4%; right: 4%; bottom: 10%; text-align: center; color: #fff;
+         font: 900 7vw/1.25 system-ui, "Segoe UI", Roboto, "DejaVu Sans", sans-serif;
+         text-shadow: 0 .5vw 0 rgba(0,0,0,.65), 0 0 1.8vw rgba(0,0,0,.75); }
+  #cap span { display: inline-block; margin: 0 .7vw; }
+  #cap span.on { color: #ffd23f; }
 </style>
 <script type="importmap">
 { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/" } }
@@ -16,110 +23,147 @@
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="title"></div>
-<div id="fade"></div>
+<div id="title" class="ov"></div>
+<div id="cap" class="ov"></div>
+<div id="flash" class="ov"></div>
+<div id="bar" class="ov"></div>
 <script type="module">
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { clamp, lerp, easeOutBack, FOV, THEMES, prepareTimeline, locate, fitDistance, camParams, camPosition, beatInfo, captionChunk } from "/logic.js";
 
-const tl = await (await fetch("/build/timeline.json")).json();
+const tl = prepareTimeline(await (await fetch("/build/timeline.json")).json());
+const aspect = tl.width / tl.height;
 const canvas = document.getElementById("c");
-const titleEl = document.getElementById("title");
-const fadeEl = document.getElementById("fade");
+const $title = document.getElementById("title"), $cap = document.getElementById("cap");
+const $flash = document.getElementById("flash"), $bar = document.getElementById("bar");
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(1);
 renderer.setSize(tl.width, tl.height, false);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(45, tl.width / tl.height, 0.1, 100);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x444455, 1.2));
-const sun = new THREE.DirectionalLight(0xffffff, 2.2);
-sun.position.set(3, 5, 4);
-scene.add(sun);
-const ground = new THREE.Mesh(new THREE.CircleGeometry(7, 64), new THREE.MeshStandardMaterial({ color: 0x3a3a44 }));
-ground.rotation.x = -Math.PI / 2;
-scene.add(ground);
+scene.background = new THREE.Color(0x000000);
+scene.fog = new THREE.Fog(0x000000, 14, 38);
+const camera = new THREE.PerspectiveCamera(FOV, aspect, 0.1, 120);
 
-const BG = { malam: 0x0b1030, siang: 0x87ceeb, studio: 0x2b2b33 };
+const hemi = new THREE.HemisphereLight(0xffffff, 0x444455, 1.1);
+const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(3, 6, 5);
+const rim = new THREE.PointLight(0xffffff, 60, 18); rim.position.set(-3.5, 3.5, -3);
+const glow = new THREE.PointLight(0xffffff, 25, 14); glow.position.set(3, 1.2, 3);
+scene.add(hemi, key, rim, glow);
 
-// --- muat semua model yang dipakai (jika file .glb tidak ada, pakai kubus pengganti) ---
+const floorMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.85, metalness: 0.1 });
+const floor = new THREE.Mesh(new THREE.CircleGeometry(40, 64), floorMat);
+floor.rotation.x = -Math.PI / 2; scene.add(floor);
+const grid = new THREE.GridHelper(80, 80, 0xffffff, 0xffffff);
+grid.position.y = 0.01; grid.material.transparent = true; grid.material.opacity = 0.45; scene.add(grid);
+
+// partikel melayang: selalu ada gerakan di latar belakang
+const NP = 220, pBase = new Float32Array(NP * 3), pSpd = new Float32Array(NP), pPos = new Float32Array(NP * 3);
+let seed = 1234567;
+const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+for (let i = 0; i < NP; i++) { pBase[i * 3] = (rnd() - 0.5) * 14; pBase[i * 3 + 1] = rnd() * 8; pBase[i * 3 + 2] = -7 + rnd() * 12; pSpd[i] = 0.25 + rnd() * 0.7; }
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute("position", new THREE.BufferAttribute(pPos, 3));
+const pMat = new THREE.PointsMaterial({ size: 0.08, transparent: true, opacity: 0.85, depthWrite: false, color: 0xffffff });
+const points = new THREE.Points(pGeo, pMat); points.frustumCulled = false; scene.add(points);
+
+// --- muat model. Jika .glb hilang: GAGALKAN build (tidak diam-diam memakai kubus) ---
 const loader = new GLTFLoader();
 const models = {};
-for (const name of [...new Set(tl.scenes.map((s) => s.model))]) {
-  let root, clips = [];
-  try {
-    const g = await loader.loadAsync("/assets/" + name);
-    root = g.scene; clips = g.animations;
-  } catch (e) {
-    console.warn("Model tidak ditemukan, pakai kubus pengganti:", name);
-    root = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ color: 0x4aa3ff }));
+async function loadAll() {
+  const names = [...new Set(tl.scenes.flatMap((s) => s.shots.map((h) => h.model)))];
+  for (const name of names) {
+    let g;
+    try { g = await loader.loadAsync("/assets/" + name); }
+    catch (e) { throw new Error(`Model "${name}" gagal dimuat dari assets/: ${e.message || e}`); }
+    const root = g.scene;
+    const box = new THREE.Box3().setFromObject(root);
+    const size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
+    const k = 2.4 / Math.max(size.x, size.y, size.z, 1e-6);
+    root.position.sub(ctr);
+    const wrap = new THREE.Group(); wrap.add(root); wrap.scale.setScalar(k); wrap.visible = false; scene.add(wrap);
+    const mixer = new THREE.AnimationMixer(root), actions = {};
+    for (const c of g.animations) { const a = mixer.clipAction(c); a.play(); a.weight = 0; actions[c.name] = a; }
+    const h = size.y * k, w = Math.max(size.x, size.z) * k;
+    models[name] = { wrap, mixer, actions, k, h, w, hasClips: g.animations.length > 0, D: fitDistance(h, w, aspect) };
+    console.log(`Model ${name}: ${g.animations.length} clip [${Object.keys(actions).join(", ")}] tinggi=${h.toFixed(2)}`);
   }
-  const box = new THREE.Box3().setFromObject(root);
-  const size = box.getSize(new THREE.Vector3());
-  const ctr = box.getCenter(new THREE.Vector3());
-  const k = 2.4 / Math.max(size.x, size.y, size.z);
-  root.position.sub(ctr);
-  const wrap = new THREE.Group();
-  wrap.add(root);
-  wrap.scale.setScalar(k);
-  wrap.position.y = (size.y * k) / 2;   // letakkan di atas lantai
-  wrap.visible = false;
-  scene.add(wrap);
-
-  const mixer = new THREE.AnimationMixer(root);
-  const actions = {};
-  clips.forEach((c) => { const a = mixer.clipAction(c); a.play(); a.weight = 0; actions[c.name] = a; });
-  models[name] = { wrap, mixer, actions, height: size.y * k };
 }
 
-const ease = (u) => u * u * (3 - 2 * u);
-const lerp = THREE.MathUtils.lerp;
-
-function placeCamera(type, u, m) {
-  const h = m.height;
-  const y = h * 0.55 + 0.3;
-  const tgt = new THREE.Vector3(0, h * 0.5, 0);
-  let p;
-  switch (type) {
-    case "dolly_in":
-      p = new THREE.Vector3(0, y, lerp(9, 5.5, ease(u))); break;
-    case "orbit": {
-      const a = lerp(-0.6, 0.9, u);
-      p = new THREE.Vector3(Math.sin(a) * 6.5, y, Math.cos(a) * 6.5); break;
-    }
-    case "pan_left":
-      p = new THREE.Vector3(lerp(1.8, -1.8, u), y, 6.5); tgt.x = p.x * 0.3; break;
-    default:
-      p = new THREE.Vector3(0, y, 6.5);
-  }
-  camera.position.copy(p);
-  camera.lookAt(tgt);
+function applyTheme(name) {
+  const th = THEMES[name] || THEMES.studio;
+  scene.background.setHex(th.bg); scene.fog.color.setHex(th.bg);
+  floorMat.color.setHex(th.floor); grid.material.color.setHex(th.grid);
+  rim.color.setHex(th.rim); glow.color.setHex(th.accent); pMat.color.setHex(th.accent);
+  key.intensity = th.key;
 }
 
-// Dipanggil Puppeteer untuk setiap frame: waktu dikendalikan manual (deterministik)
 window.renderFrame = (t) => {
-  let i = tl.scenes.findIndex((s) => t >= s.start && t < s.start + s.duration);
-  if (i < 0) i = tl.scenes.length - 1;
-  const s = tl.scenes[i];
-  const local = Math.min(Math.max(t - s.start, 0), s.duration);
-  const m = models[s.model];
+  const { sc, hi, sh, si } = locate(tl, t);
+  const sceneLocal = t - sc.start, local = t - sh.abs0, shotDur = Math.max(sh.abs1 - sh.abs0, 1e-3);
+  const m = models[sh.model];
+  const { idx, beat } = beatInfo(sc, sceneLocal);
 
-  for (const [n, mm] of Object.entries(models)) mm.wrap.visible = n === s.model;
-  for (const [n, a] of Object.entries(m.actions)) a.weight = n === s.animation ? 1 : 0;
-  m.mixer.setTime(local);
+  applyTheme(sc.background);
+  for (const [n, mm] of Object.entries(models)) mm.wrap.visible = n === sh.model;
+  for (const [n, a] of Object.entries(m.actions)) a.weight = n === sh.animation ? 1 : 0;
+  m.mixer.setTime(t);                       // fase animasi kontinu antar-shot
 
-  scene.background = new THREE.Color(BG[s.background] ?? BG.studio);
-  placeCamera(s.camera, local / s.duration, m);
+  // lapisan "hidup" di atas animasi: pop-in, napas, denyut tiap kata, goyang
+  const pop = easeOutBack(clamp(local / 0.38));
+  const f = (0.55 + 0.45 * pop) * (1 + 0.015 * Math.sin(t * 3.1) + 0.05 * beat);
+  m.wrap.scale.setScalar(m.k * f);
+  m.wrap.position.y = (m.h / 2) * f + (m.hasClips ? 0 : Math.sin(t * 2.2) * 0.08);
+  m.wrap.rotation.y = Math.sin(t * 1.7) * 0.10 + (m.hasClips ? 0 : t * 0.9) + (1 - pop) * 0.6;
+
+  grid.position.z = (t * 0.8) % 1;          // lantai bergerak ke arah kamera
+  for (let i = 0; i < NP; i++) {
+    pPos[i * 3] = pBase[i * 3] + Math.sin(t * 0.5 + i) * 0.3;
+    pPos[i * 3 + 1] = (pBase[i * 3 + 1] + t * pSpd[i]) % 8;
+    pPos[i * 3 + 2] = pBase[i * 3 + 2];
+  }
+  pGeo.attributes.position.needsUpdate = true;
+
+  // kamera: selalu bergerak + "punch" zoom saat cut
+  const p = camParams(sh.camera, local / shotDur, t, m);
+  const cp = camPosition(p, t, m.D);
+  camera.position.set(cp.x, cp.y, cp.z);
+  camera.up.set(Math.sin(p.roll), Math.cos(p.roll), 0);
+  camera.lookAt(p.tx, p.ty, 0);
+  camera.fov = FOV - 9 * Math.exp(-local * 12);
+  camera.updateProjectionMatrix();
   renderer.render(scene, camera);
 
-  titleEl.textContent = s.text_overlay || "";
-  titleEl.style.opacity = String(Math.min(1, local / 0.4));
-  const f = Math.min(1, local / 0.3, (s.duration - local) / 0.3);   // fade hitam antar scene
-  fadeEl.style.opacity = String(1 - Math.max(0, f));
+  // overlay
+  const isFirstShot = si === 0 && hi === 0;
+  $flash.style.opacity = isFirstShot ? "0" : String(0.35 * Math.exp(-local * 18));
+  $bar.style.width = (t / tl.total) * 100 + "%";
+
+  const tin = clamp(sceneLocal / 0.35);
+  $title.textContent = sc.text_overlay || "";
+  $title.style.opacity = String(tin);
+  $title.style.transform = `translateY(${(1 - tin) * -3}vh) scale(${1 + (1 - tin) * 0.3})`;
+
+  const esc = (x) => x.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const ch = captionChunk(sc, idx);
+  $cap.innerHTML = ch.words.map((w, i) => {
+    const on = ch.start + i === idx;
+    const sc2 = on ? 1.12 + 0.22 * beat : 1;
+    return `<span class="${on ? "on" : ""}" style="transform:scale(${sc2.toFixed(3)})">${esc(w.w)}</span>`;
+  }).join(" ");
 };
 
-window.ready = true;
+try {
+  await loadAll();
+  window.ready = true;
+} catch (e) {
+  window.fatal = String(e.message || e);
+  console.error(window.fatal);
+}
 </script>
 </body>
 </html>

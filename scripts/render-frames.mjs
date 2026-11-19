@@ -48,7 +48,14 @@ page.on("console", (m) => console.log("[page]", m.text()));
 page.on("pageerror", (e) => console.error("[page error]", e.message));
 await page.setViewport({ width: tl.width, height: tl.height, deviceScaleFactor: 1 });
 await page.goto(`http://localhost:${port}/index.html`);
-await page.waitForFunction("window.ready === true", { timeout: 180000 });
+await page.waitForFunction("window.ready === true || !!window.fatal", { timeout: 180000 });
+const fatal = await page.evaluate("window.fatal || null");
+if (fatal) {
+  console.error("GAGAL MEMUAT SCENE: " + fatal);
+  await browser.close();
+  server.close();
+  process.exit(1);
+}
 
 const out = `build/seg-${SHARD}.mp4`;
 const ff = spawn("ffmpeg", ["-y", "-f", "image2pipe", "-framerate", String(tl.fps), "-vcodec", "mjpeg", "-i", "-", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-r", String(tl.fps), out], { stdio: ["pipe", "ignore", "inherit"] });
@@ -58,7 +65,7 @@ console.log(`Shard ${SHARD}: frame ${from}-${to - 1} dari ${tl.totalFrames}`);
 const t0 = Date.now();
 for (let f = from; f < to; f++) {
   await page.evaluate((t) => window.renderFrame(t), f / tl.fps);
-  const buf = await page.screenshot({ type: "jpeg", quality: 95 });
+  const buf = await page.screenshot({ type: "jpeg", quality: 93, optimizeForSpeed: true });
   if (!ff.stdin.write(buf)) await once(ff.stdin, "drain");
   if ((f - from) % 60 === 0) console.log(`  frame ${f} (${((Date.now() - t0) / 1000).toFixed(0)} dtk)`);
 }

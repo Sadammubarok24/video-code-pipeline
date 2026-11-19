@@ -1,0 +1,12 @@
+{
+  "models": {
+    "kota.glb": [
+      "rise"
+    ],
+    "robot.glb": [
+      "idle",
+      "walk",
+      "wave"
+    ]
+  }
+}
