@@ -1,0 +1,104 @@
+name: render
+run-name: render ${{ inputs.run_tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenes_b64:
+        description: "scenes.json (base64)"
+        required: true
+        type: string
+      run_tag:
+        description: "ID unik dari Node-RED"
+        required: true
+        type: string
+      draft:
+        description: "true = render kecil (540x960) untuk uji cepat"
+        required: false
+        default: "false"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pip install edge-tts
+      - run: node scripts/prepare.mjs
+        env:
+          SCENES_B64: ${{ inputs.scenes_b64 }}
+          DRAFT: ${{ inputs.draft }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: build
+          retention-days: 1
+
+  frames:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: build
+      - run: npm install
+      - run: node scripts/render-frames.mjs
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: 4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seg-${{ matrix.shard }}
+          path: build/seg-${{ matrix.shard }}.mp4
+          retention-days: 1
+          if-no-files-found: ignore
+
+  assemble:
+    needs: frames
+    runs-on: ubuntu-latest
+    steps:
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: build
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: seg-*
+          path: build
+          merge-multiple: true
+      - name: Gabungkan segmen + suara
+        run: |
+          cd build
+          for f in $(ls seg-*.mp4 | sort -V); do echo "file '$f'"; done > list.txt
+          mkdir -p ../out
+          ffmpeg -y -f concat -safe 0 -i list.txt -i voice.wav \
+            -c:v copy -c:a aac -b:a 160k -shortest ../out/video.mp4
+      - name: Publikasikan sebagai Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_TAG: ${{ inputs.run_tag }}
+        run: |
+          gh release create "video-$RUN_TAG" out/video.mp4 \
+            --repo "${{ github.repository }}" \
+            --title "video-$RUN_TAG" --notes "Dirender otomatis oleh Node-RED"
